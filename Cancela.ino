@@ -1,30 +1,22 @@
 #define BLYNK_PRINT Serial
 #include "gsmconfig.h"
-
-// Select your modem:
 #define TINY_GSM_MODEM_SIM800
 #define SIM800L_IP5306_VERSION_20190610
-
-// Set serial for debug console (to the Serial Monitor, default speed 115200)
+#define cancela_pin 13
+#define TIMEOUT 1000
 #define SerialMon Serial
-
-// Set serial for AT commands (to the module)
-// Use Hardware Serial on Mega, Leonardo, Micro
 #define SerialAT Serial1
-
-// See all AT commands, if wanted
 #define DUMP_AT_COMMANDS
-
-// Define the serial console for debug prints, if needed
 #define TINY_GSM_DEBUG SerialMon
-
-// set GSM PIN, if any
 #define GSM_PIN ""
+#define reconection_attempts 2
 
-// Your GPRS credentials, if any
-const char apn[] = "YourAPN";
+short int reconnections = 0;
+const char apn[] = "zap.vivo.com.br";
 const char gprsUser[] = "";
 const char gprsPass[] = "";
+char server[] = "blynk-cloud.com";
+char port = 80;
 
 #include <TinyGsmClient.h>
 #include <BlynkSimpleTinyGSM.h>
@@ -37,55 +29,139 @@ TinyGsm modem(SerialAT);
 #endif
 TinyGsmClient client(modem);
 
+const char auth[] = "wEHwSxiifrPOmOcbJ6R4oxthUa_gBQy5";
+BlynkTimer  timer;
+void Checkconnection();
 
-// You should get Auth Token in the Blynk App.
-// Go to the Project Settings (nut icon).
-const char auth[] = "paXt0HWXUFQBqpCce_ymcl0fZif9ZHZa";
+typedef struct {
+  bool tcp_connection;
+  bool gprsconnection;
+  float rssiIndication;
+} connection;
 
 void setup()
 {
-    // Set console baud rate
-    SerialMon.begin(115200);
+  SerialMon.begin(115200);
+  delay(10);
+  setupModem();
+  SerialMon.println("Wait...");
+  SerialAT.begin(115200, SERIAL_8N1, MODEM_RX, MODEM_TX);
+  delay(6000); 
+  SerialMon.println("Initializing modem...");
+  modem.restart();
+  String modemInfo = modem.getModemInfo();
 
-    delay(10);
+  SerialMon.print("Modem Info: ");
+  SerialMon.println(modemInfo);
 
-    setupModem();
-
-    SerialMon.println("Wait...");
-
-    // Set GSM module baud rate and UART pins
-    SerialAT.begin(115200, SERIAL_8N1, MODEM_RX, MODEM_TX);
-
-    delay(6000);
-
-    // Restart takes quite some time
-    // To skip it, call init() instead of restart()
-    SerialMon.println("Initializing modem...");
-    modem.restart();
-    // modem.init();
-
-    String modemInfo = modem.getModemInfo();
-    SerialMon.print("Modem Info: ");
-    SerialMon.println(modemInfo);
-
-    // Unlock your SIM card with a PIN
-    //modem.simUnlock("1234");
-
-    Blynk.begin(auth, modem, apn, gprsUser, gprsPass);
-    // Initialize the indicator as an output
-    pinMode(LED_GPIO, OUTPUT);
+  Blynk.config(modem, auth, server, port);
+  connectNetwork(apn, gprsUser, gprsPass);
+  Blynk.connect();
+  pinMode(cancela_pin, OUTPUT);
+  digitalWrite(cancela_pin, HIGH);
+  timer.setInterval(10000, Checkconnection);
 }
 
 BLYNK_WRITE(V0) {
   int restarts = param.asInt();
   if (restarts == 1) {
-    digitalWrite(LED_GPIO,LOW);
-    }
-    else {
-    digitalWrite(LED_GPIO,HIGH);
+    digitalWrite(cancela_pin, LOW);
+    delay(TIMEOUT);
+    SerialMon.print("\v\vPin LOW\v\v");
+  }
+  else {
+    digitalWrite(cancela_pin, HIGH);
+    delay(TIMEOUT);
+    SerialMon.print("\v\vPin HIGH\v\v");
+
   }
 }
 void loop()
 {
+  if (Blynk.connected()) {
     Blynk.run();
+  }
+  timer.run();
+}
+void sendgprsinfo(String message, String number){
+  bool res = modem.sendSMS(number, String("Reconnection failed, SIM800L Restarter\n") +
+  "DATETIME: " + modem.getGSMDateTime(DATE_FULL) + "\n" +
+  "Modem info: " + modem.getModemInfo() + "\n" +
+  "Sim Status: " + modem.getSimStatus() + "\n" +
+  "Modem Name: " + modem.getModemName() + "\n" +
+  "Is network connected: "  + modem.isNetworkConnected() + "\n" +
+  "Is gprsconnected: " + modem.isGprsConnected() + "\n" + 
+  "Modem local IP: " + 
+  String(modem.localIP()[0]) + "."  +
+  String(modem.localIP()[1]) + "."  +
+  String(modem.localIP()[2]) + "."  +
+  String(modem.localIP()[3]) + "\n" + 
+  "Siganal quality: " + modem.getSignalQuality() + "\n");
+  DBG("SMS:", res ? "OK" : "fail");
+}
+
+void Checkconnection() {
+  String test = "Modem info: " + modem.getModemInfo() + "\t" +
+  "Sim Status: " + modem.getSimStatus() + "\t" +
+  "Modem Name: " + modem.getModemName() + "\t" +
+  "Is network connected: "  + modem.isNetworkConnected() + "\t" +
+  "Is gprsconnected: " + modem.isGprsConnected() + "\t" + 
+  "Modem local IP: " + 
+  String(modem.localIP()[0]) + "."  +
+  String(modem.localIP()[1]) + "."  +
+  String(modem.localIP()[2]) + "."  +
+  String(modem.localIP()[3]) + "\t" + 
+  "Siganal quality: " + modem.getSignalQuality() + "\t";
+  SerialMon.println(test);
+  
+  if (!Blynk.connected()) {
+    yield();
+    SerialAT.println("AT+CIPCLOSE");
+    SerialAT.println("AT+CIPSTART");
+    delay
+    (1000);
+    Blynk.connect();
+    if (!Blynk.connected() && reconnections < reconection_attempts) {
+      SerialMon.println("\n\n Reconnection failed, reestarting modem... \n\n");
+      modem.restart();
+      yield();
+      String modemInfo = modem.getModemInfo();
+      reconnections++;
+    }
+    else {
+      sendgprsinfo("test", "+5561984619076");
+      ESP.restart();
+    }
+  }
+}
+
+bool connectNetwork(const char* apn, const char* user, const char* pass)
+{
+  BLYNK_LOG1(BLYNK_F("Modem init..."));
+  if (!modem.begin()) {
+    BLYNK_FATAL(BLYNK_F("Cannot init"));
+  }
+
+  switch (modem.getSimStatus()) {
+    case SIM_ERROR:  BLYNK_FATAL(BLYNK_F("SIM is missing"));    break;
+    case SIM_LOCKED: BLYNK_FATAL(BLYNK_F("SIM is PIN-locked")); break;
+    default: break;
+  }
+
+  BLYNK_LOG1(BLYNK_F("Connecting to network..."));
+  if (modem.waitForNetwork()) {
+    String op = modem.getOperator();
+    BLYNK_LOG2(BLYNK_F("Network: "), op);
+  } else {
+    BLYNK_FATAL(BLYNK_F("Register in network failed"));
+  }
+
+  BLYNK_LOG3(BLYNK_F("Connecting to "), apn, BLYNK_F(" ..."));
+  if (!modem.gprsConnect(apn, user, pass)) {
+    BLYNK_FATAL(BLYNK_F("Connect GPRS failed"));
+    return false;
+  }
+
+  BLYNK_LOG1(BLYNK_F("Connected to GPRS"));
+  return true;
 }
